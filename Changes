@@ -1,0 +1,11 @@
+2009-04-10  Jonathan Yu <frequency@cpan.org>
+
+	Creation of IO-Journal stub package
+
+2009-04-10  Jonathan Yu <frequency@cpan.org>
+
+	Creation of IO-Journal stub directory - for a module providing transaction-oriented journalling I/O :-)
+
+;; Local Variables:
+;; coding: utf-8
+;; End:
