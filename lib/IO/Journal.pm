@@ -1,13 +1,7 @@
 # IO::Journal
 #  A file I/O interface with journalling support, based on libjio.
 #
-# $Id: ISAAC.pm 6045 2009-04-07 02:34:58Z FREQUENCY@cpan.org $
-#
-# By Jonathan Yu <frequency@cpan.org>, 2009. All rights reversed.
-#
-# This package and its contents are released by the author into the
-# Public Domain, to the full extent permissible by law. For additional
-# information, please see the included `LICENSE' file.
+# $Id: Journal.pm 8239 2009-07-26 03:28:55Z FREQUENCY@cpan.org $
 
 package IO::Journal;
 
@@ -15,47 +9,181 @@ use strict;
 use warnings;
 use Carp ();
 
+use Fcntl (
+  'O_RDONLY',
+  'O_RDWR',
+  'O_CREAT',
+  'O_TRUNC',
+  'O_APPEND',
+);
+
+use IO::Journal::Transaction;
+
 =head1 NAME
 
-IO::Journal - Perl interface for journalled file operations
+IO::Journal - Perl module providing durable transaction-oriented I/O
 
 =head1 VERSION
 
-Version 0.1 ($Id: ISAAC.pm 6045 2009-04-07 02:34:58Z FREQUENCY@cpan.org $)
+Version 0.2 ($Id: Journal.pm 8239 2009-07-26 03:28:55Z FREQUENCY@cpan.org $)
 
 =cut
 
-use version; our $VERSION = qv('0.1');
+use version; our $VERSION = qv('0.2');
 
 =head1 DESCRIPTION
 
 To ensure reliability, some file systems and databases provide support for
 something known as journalling. The idea is to ensure data consistency by
 creating a log of actions to be taken (called a Write Ahead Log) before
-committing them to disk. That way, if a transaction were to fail, the
-write ahead log could be used to finish writing the data.
+committing them to disk. That way, if a transaction were to fail due to a
+system crash or other unexpected event, the write ahead log could be used
+to finish writing the data.
 
-While this functionality is often available with full-fledged databases,
-often it is not completely necessary, yet reliability can be desirable.
-Other times, the filesystem does not provide support for journalling,
-but it can still be desirable. Thankfully, Alberto Bertogli published a
-userspace C library called libjio that can provide these features in a
-small (less than 1500 lines of code) library with no external dependencies.
+While this functionality is often available with networked databases, it can
+be a rather memory- and processor-intensive solution, even where reliable
+writes are important. In other cases, the filesystem does not provide native
+journalling support, so other tricks may be used to ensure data integrity,
+such as writing to a separate temporary file and then overwriting the file
+instead of modifying it in-place. Unfortunately, this method cannot handle
+threaded operations appropriately.
 
-This package has been published as a stub for the actual module and as
-a bit of a land grab. Expect a working version in a few weeks.
+Thankfully, Alberto Bertogli published a userspace C library called libjio
+that can provide these features in a small (less than 1500 lines of code)
+library with no external dependencies.
+
+=head1 NOTICE
+
+This module is currently a B<preview release>. Please, please, PLEASE don't
+use it for production use yet, until all the kinks have been found and
+sorted out.
 
 =head1 SYNOPSIS
 
   use IO::Journal;
 
-  # This is my current idea of what the interface will look like. It
-  # may change prior to the actual release.
-  my $file = IO::Journal->new('filename.txt');
-  $file->print('...');
-  # or
-  print $file ('...');
-  $file->commit;
+  my $journal = IO::Journal->open('>', 'filename.txt');
+
+  # Start a new transaction
+  my $trans = $journal->begin_transaction();
+  $trans->syswrite("Hello");
+  $trans->syswrite("World\n");
+  $trans->commit;
+  # File now contains "Hello World\n"
+
+  $trans->rollback;
+  # File is now blank
+
+=head1 COMPATIBILITY
+
+This module was tested under Perl 5.10.0, using Debian Linux. It provides
+some convenience methods similar to C<IO::Handle>, but most of the work is
+based on libjio, which may be installed automatically during this module's
+build process through C<Alien::Libjio>.
+
+If you encounter any problems on a different version or architecture, please
+contact the maintainer.
+
+=cut
+
+# This is the code that actually bootstraps the module and exposes the
+# interface for the user. XSLoader is believed to be more memory efficient
+# than DynaLoader.
+use XSLoader;
+XSLoader::load(__PACKAGE__, $VERSION);
+
+# In order to mimic the Perl open function, we must map the following Perl
+# flags to their fopen counterparts:
+#
+# Perl   C   Flags
+#   <    r   O_RDONLY
+#  +<    r+  O_RDWR
+#   >    w   O_RDWR | O_CREAT | O_TRUNC
+#  +>    w+  O_RDWR | O_CREAT | O_TRUNC
+#  >>    a   O_RDWR | O_CREAT | O_APPEND
+# +>>    a+  O_RDWR | O_CREAT | O_APPEND
+#
+# The Fcntl core module provides these constants.
+my %FLAGMAP = (
+  # Mode   Unix-style flags
+  '<'   => O_RDONLY,
+  '+<'  => O_RDWR,
+  '>'   => O_RDWR | O_CREAT | O_TRUNC,
+  '+>'  => O_RDWR | O_CREAT | O_TRUNC,
+  '>>'  => O_RDWR | O_CREAT | O_APPEND,
+  '+>>' => O_RDWR | O_CREAT | O_APPEND,
+);
+
+=head1 METHODS
+
+=head2 IO::Journal->open( $mode, $filename )
+
+Creates a C<IO::Journal> object on top of libjio's file handle system (an
+opaque C<jfs_t> struct). This method opens the given file referenced by
+C<filename> using the given Perl-like C<mode> string, which behaves similarly
+to Perl's standard C<open> function.
+
+Note that, unlike Perl's open, this method does not support the one-parameter
+variant where a mode and filename are specified in the same string.
+
+Example code:
+
+  my $journal = IO::Journal->open('>>', 'filename');
+
+This method will return an appropriate B<IO::Journal::Transaction> object
+or throw an exception on error.
+
+=cut
+
+sub open {
+  my ($class, $mode, $filename) = @_;
+
+  Carp::croak('You must call this as a class method') if ref($class);
+
+  Carp::croak('Unrecognized mode: ' . $mode) unless exists($FLAGMAP{$mode});
+
+  return $class->sysopen($filename, $FLAGMAP{$mode});
+}
+
+=head2 $journal->begin_transaction()
+
+This method starts a new transaction, which is essentially the same as
+libjio's C<jtrans_new> function. In order to understand how to work with
+transactions, you'll need to look at L<IO::Journal::Transaction>.
+
+For now, this is really just a nicer way of constructing a new Transaction
+object, similar in nature to:
+
+  my $trans = IO::Journal::Transaction->new($journal);
+  # looks messier & is longer to type than
+  my $trans = $journal->begin_transaction();
+
+It returns a newly created B<IO::Journal::Transaction> object, or throws
+an exception on error.
+
+=cut
+
+sub begin_transaction {
+  my ($self) = @_;
+
+  Carp::croak('You must call this as an object method') unless ref($self);
+
+  return IO::Journal::Transaction->new($self);
+}
+
+=head2 IO::Journal->sysopen( $filename, $mode, [ $permissions ] )
+
+This function is the same as open, but is instead closer to the usual Unix
+system call, requiring a set of octal flags (those provided by F<fcntl.h>
+and exposed to Perl in L<Fcntl>).
+
+As a result, it's much less convenient than using C<open> and doesn't have
+as much error checking either, since it's implemented completely in XS.
+
+One useful feature of sysopen is that it optionally supports giving an octal
+specification of permissions to use in case the file doesn't yet exist. By
+default, new files are created with the permissions B<0666> (rw-rw-rw-) but
+the actual file created will vary based on your running C<umask>.
 
 =head1 AUTHOR
 
@@ -73,6 +201,8 @@ Your name here ;-)
 
 Special thanks to Alberto Bertogli E<lt>albertito@blitiri.com.arE<gt> for
 developing this useful library and for releasing it into the public domain.
+He was very patient while developing this library, and was always open to
+new ideas.
 
 =back
 
@@ -136,8 +266,10 @@ tracker.
 
 =head1 SEE ALSO
 
-L<http://blitiri.com.ar/p/libjio/>, libjio's C project page, which has the
-full source code and accompanying Python bindings.
+L<Alien::Libjio>, a Perl module for installing and finding libjio.
+
+L<http://blitiri.com.ar/p/libjio/>, Alberto Bertogli's page about libjio,
+which explains the purpose and features of libjio.
 
 =head1 CAVEATS
 
@@ -151,18 +283,9 @@ There are no known bugs as of this release.
 
 =head1 LICENSE
 
-Copyleft 2009 by Jonathan Yu <frequency@cpan.org>. All rights reversed.
-
-I, the copyright holder of this package, hereby release the entire contents
-therein into the public domain. This applies worldwide, to the extent that
-it is permissible by law.
-
-In case this is not legally possible, I grant any entity the right to use
-this work for any purpose, without any conditions, unless such conditions
-are required by law.
-
-The full details of this can be found in the B<LICENSE> file included in
-this package.
+In a perfect world, I could just say that this package and all of the code
+it contains is Public Domain. It's a bit more complicated than that; you'll
+have to read the included F<LICENSE> file to get the full details.
 
 =head1 DISCLAIMER OF WARRANTY
 

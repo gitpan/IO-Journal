@@ -10,7 +10,13 @@
 
 # Module::Build generated files and dirs.
 ^Build$
+^Build\.bat$
 ^_build/
+
+# Source object files
+^src/.*\.o$
+^lib/IO/Journal\.(o|c|xs)$
+^lib/IO/Journal/Transaction\.(o|c|xs)$
 
 # Module::Install included files.
 ^inc/Module/Install
@@ -30,6 +36,7 @@
 \#$
 \b\.#
 \.bak$
+\.tmp$
 
 # Devel::Cover files.
 \bcover_db\b
